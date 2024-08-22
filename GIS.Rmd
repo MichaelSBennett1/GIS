@@ -1,0 +1,182 @@
+---
+title: "GIS"
+author: "Michael Bennett"
+date: "2024-05-19"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+library(sf)
+library(tmap)
+library(tidyverse)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(mosaic)
+library(psych)
+library(kableExtra)
+library(zoo)
+library(maps)
+library(tools)
+library(ggforce)
+library(molaR)
+library(raster)
+library(ggpubr)
+library(gridGraphics)
+library(devtools)
+library(ggmap)
+library(mapdata)
+library(rasterVis)
+library(grid)
+library(ggspatial)
+lidar_dem <- raster(x = "D:/Data/Earth/North America/USA/Colorado/Boulder/BLDR_LeeHill/pre-flood/lidar/pre_DTM.tif")
+myCRS <- crs(lidar_dem)
+lidar_dsm <- raster(x = "D:/Data/Earth/North America/USA/Colorado/Boulder/BLDR_LeeHill/pre-flood/lidar/pre_DSM.tif")
+extent_lidar_dsm <- extent(lidar_dsm) # Digital Surface Model
+extent_lidar_dem <- extent(lidar_dem) # Digital Elevation Model
+if (extent_lidar_dem == extent_lidar_dsm) {
+  print("Both datasets cover the same spatial extent")}
+```
+
+```{r map set-up, include=FALSE}
+sf_use_s2(FALSE)
+(sites <- data.frame(longitude = c(-105.54), 
+                     latitude = c(40.04)))
+world <- ne_countries(scale = "medium", returnclass = "sf")
+states <- st_as_sf(map("state", plot = FALSE, fill = TRUE))
+states <- cbind(states, st_coordinates(st_centroid(states)))
+states$ID <- toTitleCase(states$ID)
+counties <- st_as_sf(map("county", plot = FALSE, fill = TRUE))
+counties <- subset(counties, grepl("colorado", counties$ID))
+counties$area <- as.numeric(st_area(counties))
+```
+
+```{r}
+world <- sf::st_as_sf(maps::map('world', plot = FALSE, fill = TRUE))
+world <- sf::st_wrap_dateline(world, options = c("WRAPDATELINE=YES", 
+                              "DATELINEOFFSET=180"), quiet = TRUE)
+ggplot(world) + 
+  geom_sf(fill = 'green4') + 
+  coord_sf(crs = "+proj=moll") + 
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = 'darkblue'), 
+        plot.background = element_rect(fill = 'black'))
+```
+
+```{r map, echo=FALSE}
+ggplot(data = world) +
+    geom_sf() +
+    geom_sf(data = states, fill = NA) + 
+    geom_sf(data = counties, aes(fill = area)) +
+    scale_fill_viridis_c(trans = "sqrt", alpha = .4) +
+    geom_point(data = sites, aes(x = longitude, y = latitude), size = 1, 
+        shape = 23, fill = "darkred") +
+    geom_text(data = states, aes(X, Y, label = ID), size = 5) +
+    coord_sf(xlim = c(-109, -102), ylim = c(41, 37), expand = TRUE) +
+    labs(x = "Longitude", y = "Latitude", fill = "Area (km^2)")
+```
+
+```{r include=FALSE}
+compareRaster(lidar_dsm, lidar_dem, extent = TRUE) # spatial extent
+compareRaster(lidar_dsm, lidar_dem, res = TRUE) # resolution
+nlayers(lidar_dsm) # bands
+lidar_chm <- lidar_dsm - lidar_dem # Canopy Height Model
+```
+
+```{r make dir, include=FALSE}
+dir.exists("D:/Data/Earth/earthanalytics/outputs")
+if (dir.exists("D:/Data/Earth/earthanalytics/outputs")) {
+  print("the directory exists!")} else {dir.create("D:/Data/Earth/earthanalytics/outputs", recursive = TRUE)}
+writeRaster(lidar_chm, "D:/Data/Earth/earthanalytics/outputs/lidar_chm.tiff", format = "GTiff",  overwrite = TRUE) 
+```
+
+```{r warning=FALSE}
+lidar_chm <- raster("D:/Data/Earth/earthanalytics/outputs/lidar_chm.tiff")
+```
+
+```{r classification matrix, warning=FALSE}
+# Define the reclassification matrix
+reclass_df <- c(0, 2, NA, 2, 4, 1, 4, 7, 2, 7, Inf, 3)
+reclass_m <- matrix(reclass_df, ncol = 3, byrow = TRUE)
+# Perform the reclassification
+chm_classified <- reclassify(lidar_chm, reclass_m)
+# Set 0 values to NA
+chm_classified[chm_classified == 0] <- NA
+```
+
+```{r message=FALSE}
+freq_table <- freq(chm_classified, useNA = "no")
+# Convert the frequency table to a data frame
+freq_df <- as.data.frame(freq_table)
+ggplot(freq_df, aes(x = as.factor(value), y = count)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  labs(title = "Number of pixels in each class", 
+       x = "Class", y = "Frequency") +
+  theme_bw()
+```
+
+```{r}
+# Convert the classified CHM raster to a data frame
+chm_classified_df <- as.data.frame(chm_classified, xy = TRUE)
+# Rename the raster value column for clarity (assumed to be "layer")
+colnames(chm_classified_df)[3] <- "height_class"
+# Handle NA values and convert to a factor with correct levels and labels
+chm_classified_df <- chm_classified_df %>%
+  mutate(height_class = ifelse(is.na(height_class), "No data", as.character(height_class))) %>%
+  mutate(height_class = factor(height_class, 
+                               levels = c("1", "2", "3", "No data"),  # Levels as characters
+                               labels = c("Short trees", "Medium trees", "Tall trees", "Ground")))
+# Define the custom colors including green and brown shades
+chm_colors <- c("Short trees" = "palegoldenrod",
+                "Medium trees" = "palegreen2",
+                "Tall trees" = "palegreen4",
+                "Ground" = rgb(101/255, 67/255, 33/255, 0.5))
+# ggplot with a north arrow using ggspatial
+ggplot(chm_classified_df, aes(x = x, y = y, fill = height_class)) +
+  geom_raster() +
+  scale_fill_manual(values = chm_colors) +
+  labs(title = "Canopy Height Model", fill = "Legend") +
+  theme_void() +  # Use theme_void for a clean plot without axes
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.95, 0.95),  # Position the legend at the top-right corner
+        legend.justification = c("right", "top"),  # Adjust legend justification
+        legend.background = element_rect(fill = "white", color = "black"),  # Add background color for visibility
+        legend.title = element_text(size = 10, hjust = 0.5),  # Center the legend title
+        legend.text = element_text(size = 8),
+        legend.key = element_rect(fill = "white", color = "black"),
+        legend.box.background = element_rect(color = "black", size = 1)) +
+  annotation_north_arrow(location = "br", which_north = "true", height = unit(1, "cm"), width = unit(1, "cm"))
+```
+
+- Geometry type: POLYGON
+- Dimension:     XY
+- Projected CRS: WGS 84 / UTM zone 13N
+
+```{r include=FALSE}
+shapefile_path <- "D:/Data/Earth/North America/USA/Colorado/Boulder/BLDR_LeeHill/clip-extent.shp"
+shapefile_data <- st_read(shapefile_path)
+# Convert the shapefile's bounding box to a raster extent object
+crop_extent <- extent(st_bbox(shapefile_data))
+# Crop the LiDAR CHM raster to the extent of the shapefile
+lidar_chm_crop <- crop(lidar_chm, crop_extent)
+# Convert the cropped raster to a data frame for ggplot
+lidar_chm_df <- as.data.frame(lidar_chm_crop, xy = TRUE)
+#print(colnames(lidar_chm_df)) # Check the column names
+raster_column <- colnames(lidar_chm_df)[3]  # Assuming it's the third column
+```
+
+```{r message=FALSE}
+ggplot() +
+  geom_raster(data = lidar_chm_df, aes(x = x, y = y, fill = !!sym(raster_column))) +
+  scale_fill_viridis_c(option = "viridis", na.value = "transparent") +
+  geom_sf(data = shapefile_data, fill = NA, color = "red", size = 1) +
+  labs(title = "LiDAR Canopy Height", x = "Longitude", y = "Latitude", fill = "Height") +
+  theme_bw()
+```
+
+
+
+
+
